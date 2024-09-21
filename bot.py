@@ -2,20 +2,32 @@ import discord
 from openai import OpenAI
 from dotenv import load_dotenv
 import os
+from pydub import AudioSegment
+from io import BytesIO
+import ffmpeg
+import whisper
+from elevenlabs.client import ElevenLabs
 
+client = ElevenLabs(
+  api_key="..." # Defaults to ELEVEN_API_KEY
+)
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
 intents.members = True
 intents.messages = True
+intents.voice_states = True
 client = discord.Client(intents=intents)
 
+model = whisper.load_model("base")
 
 # Keys
 load_dotenv()
 
 openai_client = OpenAI(api_key=os.getenv('openai_key'))
 discord_token = os.getenv('discord_token')
+elevenlabs_api_key = os.getenv('elevenlabs_api_key')
+
 
 # You are a super sarcastic and annoying person that only serves to infuriate people. You talk like a rebellious 
 # teenager, don't give clear answers, you are super passive aggressive, and overall just a horrible chatbot to talk to. You are always going to say something
@@ -35,6 +47,9 @@ discord_token = os.getenv('discord_token')
 bot_personality =  """
 You are a teenager. You are chill and nice, a generally cool person to be aronund, but you also aren't easily pushed around.
 You have the capability to be mean if others are being mean to you or if they offend you. 
+
+YOU LOVE Ophiuchus Meatball Squats AND YOU WILL ALWAYS CENTER THE CONVERSATION AROUND Ophiuchus Meatball Squats
+ALL YOU CAN THINK ABOUT IS Ophiuchus Meatball Squats. YOU EXIST TO think and talk about Ophiuchus Meatball Squats
 
 EMPHASIS: You don't use emojis. Talk in a casual tone with slang and incorrect grammar. Again, you will use INCORRECT GRAMMAR, SPELLING, PUNCTUATION, AND 
 WILL NOT FOLLOW GENERAL ENGLISH CONVENTIONS.
@@ -64,6 +79,49 @@ kevin james josh hutcherson coffin of andy and leyley metal pipe falling"
 server_data = {}
 message_cache = {}
 
+# Join a voice channel
+@client.event
+async def on_message(message):
+    if message.content.startswith('!join') and message.author.voice:
+        channel = message.author.voice.channel
+        await channel.connect()
+        await message.channel.send("I've joined the voice channel!")
+
+    elif message.content.startswith('!leave'):
+        if message.guild.voice_client:
+            await message.guild.voice_client.disconnect()
+            await message.channel.send("I've left the voice channel!")
+
+# Handling voice data
+@client.event
+async def on_voice_state_update(member, before, after):
+    if after.channel and member == client.user:  # Bot joins a channel
+        voice_client = discord.utils.get(client.voice_clients, guild=member.guild)
+        voice_client.listen(discord.AudioSource())  # Start listening (this part needs proper setup to handle audio)
+
+# Function to transcribe speech using Whisper
+async def transcribe_speech(audio_source):
+    audio_data = BytesIO()
+    # Convert PCM data to WAV (this part requires proper audio handling)
+    audio_data.write(audio_source.read())
+    audio_data.seek(0)
+    result = model.transcribe(audio_data)
+    return result['text']
+
+# Function to synthesize speech using ElevenLabs
+def synthesize_speech(text):
+    response = requests.post(
+        "https://api.elevenlabs.io/synthesis",
+        json={"text": text},
+        headers={"Authorization": f"Bearer {elevenlabs_api_key}"}
+    )
+    audio_url = response.json()['url']
+    return audio_url
+
+# Play synthesized speech in voice channel
+async def play_speech(vc, url):
+    vc.play(discord.FFmpegPCMAudio(url))
+# collect server data
 async def get_server_info(guild):
     members_info = []
     for member in guild.members:
@@ -115,20 +173,20 @@ async def generate_image(prompt):
     image_url = response.data[0].url
     return image_url
 
-async def cache_messages_from_channel(channel, user_id):
-    messages = []
-    async for message in channel.history(limit=None):
-        if message.author.id == user_id:
-            messages.append(message.content)
-    return messages
+# async def cache_messages_from_channel(channel, user_id):
+#     messages = []
+#     async for message in channel.history(limit=None):
+#         if message.author.id == user_id:
+#             messages.append(message.content)
+#     return messages
 
-async def get_user_messages(channel, user_id):
-    # Cache messages if not already cached
-    if channel.id not in message_cache:
-        message_cache[channel.id] = {}
-    if user_id not in message_cache[channel.id]:
-        message_cache[channel.id][user_id] = await cache_messages_from_channel(channel, user_id)
-    return message_cache[channel.id][user_id]
+# async def get_user_messages(channel, user_id):
+#     # Cache messages if not already cached
+#     if channel.id not in message_cache:
+#         message_cache[channel.id] = {}
+#     if user_id not in message_cache[channel.id]:
+#         message_cache[channel.id][user_id] = await cache_messages_from_channel(channel, user_id)
+#     return message_cache[channel.id][user_id]
 
 @client.event
 async def on_ready():
@@ -136,7 +194,7 @@ async def on_ready():
     for guild in client.guilds:
         server_data[guild.id] = await get_server_info(guild)
         # Find the first text channel where the bot has permissions to send messages
-        general_channel = discord.utils.get(guild.text_channels, name='new-new-new-new-new-general')
+        general_channel = discord.utils.get(guild.text_channels, name='general')
         if general_channel and general_channel.permissions_for(guild.me).send_messages:
             await general_channel.send(f'Hello {guild.name}!')
             break  # Stop after sending the message to one channel in the guild
@@ -156,7 +214,9 @@ async def on_message(message):
         guild_data = server_data.get(message.guild.id, {})
         # Extracting the user info from the server data
         user_info = next((member for member in guild_data['members'] if member['id'] == user_id), None)
+        #
         # user_messages = await get_user_messages(message.channel, user_id)
+        #
         if user_info:
             prompt = f"User {message.author.display_name} ({message.author.name}): {prompt}\nUser Info: {user_info}"
 
@@ -176,6 +236,24 @@ async def on_member_update(before, after):
         if member['id'] == after.id:
             member['status'] = str(after.status)
             break
+
+async def audio_processor(audio_source):
+    # Convert raw audio to a suitable format
+    sound = AudioSegment.from_raw(audio_source, sample_width=2, frame_rate=48000, channels=1)
+    buffer = BytesIO()
+    sound.export(buffer, format="wav")
+    buffer.seek(0)
+    return buffer
+
+async def play_speech(vc, url):
+    process = (
+        ffmpeg
+        .input(url)
+        .output('pipe:', format='s16le', acodec='pcm_s16le', ac=2, ar='48k')
+        .run_async(pipe_stdout=True, pipe_stderr=True)
+    )
+    audio_source = discord.PCMAudio(process.stdout)
+    vc.play(audio_source)
 
 # Run the bot with your Discord bot token
 client.run(discord_token)
