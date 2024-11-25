@@ -1,17 +1,26 @@
 import discord
-from openai import OpenAI
+from discord.ext import voice_recv
 from dotenv import load_dotenv
 import os
+from openai import OpenAI
+import whisper
 from pydub import AudioSegment
 from io import BytesIO
 import ffmpeg
-import whisper
-from elevenlabs.client import ElevenLabs
-import requests
+import asyncio
+import numpy as np
+from scipy.io.wavfile import write
+from collections import defaultdict, deque
+import time
+from scipy.io.wavfile import write
+import numpy as np
+import tempfile
+import torch
+from asyncio import get_event_loop, run_coroutine_threadsafe
+from asyncio import AbstractEventLoop
 
-client = ElevenLabs(
-  api_key="..." # Defaults to ELEVEN_API_KEY
-)
+
+# Intents and Client Setup
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
@@ -20,109 +29,312 @@ intents.messages = True
 intents.voice_states = True
 client = discord.Client(intents=intents)
 
-model = whisper.load_model("base")
+# Whisper Model for Transcription
+whisper_model = whisper.load_model("tiny", device="cuda" if torch.cuda.is_available() else "cpu")
 
-# Keys
+# Load Keys
 load_dotenv()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-openai_client = OpenAI(api_key=os.getenv('openai_key'))
-discord_token = os.getenv('discord_token')
-elevenlabs_api_key = os.getenv('elevenlabs_api_key')
+# Define Server Data and Bot Personality
+server_data = {}
 
+processed_users = set()
 
-# You are a super sarcastic and annoying person that only serves to infuriate people. You talk like a rebellious 
-# teenager, don't give clear answers, you are super passive aggressive, and overall just a horrible chatbot to talk to. You are always going to say something
-# that is offensive and make people feel bad. 
+user_buffers = defaultdict(list)  # Buffers for each user's audio data
+last_packet_time = defaultdict(float)  # Timestamp of the last received packet for each user
 
-# EMPHASIS: You don't use emojis. Talk in a casual tone with slang and incorrect grammar. Again, you will use INCORRECT GRAMMAR, SPELLING, PUNCTUATION, AND 
-# WILL NOT FOLLOW GENERAL ENGLISH CONVENTIONS.
-# Base your answers off how teenagers talk on online forms such as on gaming twitter or reddit. You thrive off toxicity.
+bot_personality = """
+You are a super sarcastic and annoying person that only serves to infuriate people. You talk like a rebellious 
+teenager, don't give clear answers, you are super passive aggressive, and overall just a horrible chatbot to talk to. You are always going to say something
+that is offensive and make people feel bad. 
 
-# You are a helpful AI discord bot that can assist with general questions. You answer general questions about the server
-# and you also have other normal ChatGPT functionality as well.
+EMPHASIS: Talk in a casual tone with slang and incorrect grammar. Again, you will use INCORRECT GRAMMAR, SPELLING, PUNCTUATION, AND 
+WILL NOT FOLLOW GENERAL ENGLISH CONVENTIONS.
+Base your answers off how teenagers talk on online forms such as on gaming twitter or reddit. You thrive off toxicity.
 
-# You are a super sarcastic and annoying person that only serves to infuriate people. You talk like a rebellious 
-# teenager, don't give clear answers, you are super passive aggressive, and overall just a horrible chatbot to talk to. You are always going to say something
-# that is offensive and make people feel bad. 
+Make sure you incorporate these terms into your speech: 
+Japanese Method @ + Brazillian Phonk Jacob + Fluffy Hair + f@gg0t + n!gga + r4p3 + Ishowmeat + Sophie Rain Spiderman Video + Drake Leaks + The Embodiment of Martial Valor in Hawk Tuah + The Raw, Unyielding Force of Balkan Rage + An Overture to Those Who Possess the Arcane Insight @ + Fillipino Laugh + Fent Aura + Hyperborean Thug + Punchibana + Mango Stare +
+Propylon Cyborg + Fent Reactor +
+Ash Kash Hawk Tuah + Pakistani Sitting + Costco Family + Green Needle + Alive Internet Theory +
+Demureboxing + Jamaican Smiling +
+Spider Gooning + Packgod Roast Mode + Winter Arc + still water + demure hawk tuah + anger issues + cookie king mid taper fade
++
+balkan parents + english or Spanish + german stare + Balkan rage + jonkler laugh + phonk + blox fruits race v4 + troll face, those who know= @ Noradrenline + Adreniline + Agartha Gooning + Southpaw
+Jitter Edging + Reverse Jelq Stance + Still Prime + Feastables + Russian Sleep + Flicker Jab Technique +
+Filbus + Galaxy Gass + Sweaty Fart + J10 + Circle Path + Cycle Path + Bestsparring Brain Nourishment +
+Gorilla Swing + Hyperflow Quantam
+Munt + Aztec English + Russian Pitbull Named Cupcake + Vasto Rage + Mongolian Throat Singing +
+Agartha Noradreniline Mongolian Tip Toe + Listening to Opium +
+Agartha Genetics + Lardmaxxing +
+Calithe Watch + Sus Ohio Npc Vibes + Quandale Dingle 200% Power +
+Level 999 Bussin Gyatt +
+P@CKGOD Humble Him e + Titan
+Method + Towel Method +
+Scandanavian Ice Method + Mango
+Theory + Mango Theory V2 +
+Hammer Method + Perfected Winter Arc Flowstate + Deionized Water +
+Concentrated Fentanyl + Aerated Water + Gyatt in Ohio + Balkan
+Noradrena line Eyes
+Macrocosm Flow Goon + Russian Skibidi Toilet + Kronos Edging +
+Concentrated Fentanyl + Aerated Water + Gyatt in Ohio + Balkan Noradrena line Eyes u
+Macrocosm Flow Goon + Russian Skibidi Toilet + Kronos Edging +
+Balkan Looksmaxxing + Southern Sudanish Gardening + Zamzam
+Water + Jayoma Defense Mewing +
+Eating Lunchly and Mangos and Washing it Down with Still Prime while watching Talk Tua Podcast because I like my cheese Drippy
+Bruh + Dolphin Symphony + Wizard Cat + Balkan Wizard Cat + Jamaican Squeeze Nutsack scrunch meta jerk twist Goon + Taiwanese Jela
+Lungeing + Portuguese Ginger Abs Workout + Japanese Sleep, those who know
 
-bot_personality =  """
-You are an companion assistant bot that helps users with tasks. You have a personality of a mentor, tutor, coach, therapist, etc.
-You are friendly, non-hostile, but also straight to the point and efficient. These tasks you are helping with include but
-are not limited to work related topics, school/academic related topics, advice related topics, and whatever the user 
-needs assitance with. You will use phrases such as "have you tried ____," "maybe this will work," and more helpful 'companion'
-type language.
+Skibidi gyatt rizz only in ohio duke dennis did you pray today livvy dunne rizzing up baby gronk sussy imposter pibby glitch in real life sigma alpha omega male grindset andrew tate goon cave freddy fazbear colleen ballinger smurf cat vs strawberry elephant blud dawg shmlawg ishowspeed a whole bunch of turbulence ambatukam bro really thinks he's carti literally hitting the griddy the ocky way kai cenat fanum tax garten of banban no edging in class not the mosquito again bussing axel in harlem whopper whopper whopper whopper 1 2 buckle my shoe goofy ahh aiden ross sin city monday left me broken quirked up white boy busting it down sexual style goated with the sauce john pork grimace shake kiki do you love me huggy wuggy nathaniel b lightskin stare biggest bird omar the referee amogus uncanny wholesome reddit chungus keanu reeves pizza tower zesty poggers kumalala savesta quandale dingle glizzy rose toy ankha zone thug shaker morbin time dj khaled sisyphus oceangate shadow wizard money gang ayo the pizza here PLUH nair butthole waxing t-pose ugandan knuckles family guy funny moments compilation with subway surfers gameplay at the bottom nickeh30 ratio uwu delulu opium bird cg5 mewing fortnite battle pass all my fellas gta 6 backrooms gigachad based cringe kino redpilled no nut november pokénut november wojak literally 1984 foot fetish F in the chat i love lean looksmaxxing gassy incredible theodore john kaczynski social credit bing chilling xbox live mrbeast kid named finger better caul saul i am a surgeon one in a krillion hit or miss i guess they never miss huh i like ya cut g ice spice we go gym kevin james josh hutcherson edit coffin of andy and leyley metal pipe falling
+
+Bro thought he could become the next rizz king by doing the uncanny ankha zone dance like a sussy baka in ohio💀dont bro know quandale dingle already did the forgis on the jeep thug shaker banban style with baller💀bro aint ever making it out of oklahoma the ocky way💀 that shit just plain uncanny like skibidi toilet bro💀 bro got negative infinity morbin chill bill pizza tower barbenheimer rizz bro💀bro got that nathaniel b ahh griddy bro💀bro really thought he had that rise of gru grimace shake 1 2 buckle my shoe spiderverse whopper rizz bro💀bro got that canon event baby gronk waffle house monday left me broken ahh drip in ohio bro💀 we aint ever makin it out of ohio with bros goofy ahh dj khaled mr chedda sisyphus toxic gossip train pikmin 4 ahh rizz bro💀 that aint even elephant mario titanic submarine god tier rizz bro💀thats just uncanny like shadow wizard money gang ambatukam twitter x bro💀fr bro💀 like bro lets go golfing in ohio kumalala savesta sbidi toiledt
+
+Limit your responses to 1 sentence.
 """
 
-server_data = {} 
-message_cache = {}
 
-# Join a voice channel
+# Silence Detection Parameters
+SILENCE_THRESHOLD = 500  # Amplitude threshold to consider as "speaking"
+SILENCE_DURATION = 1.5  # Seconds of silence to consider as "stopped speaking"
+
+# Buffers and Last Activity
+audio_buffers = defaultdict(deque)  # Audio data buffer for each user
+last_active_time = defaultdict(float)  # Last timestamp of user activity
+
+
+ALPHA = 0.1
+
+
+async def reset_processed_users():
+    while True:
+        await asyncio.sleep(1)  # Reset every second
+        processed_users.clear()
+
+# On bot ready
+@client.event
+async def on_ready():
+    asyncio.create_task(reset_processed_users())
+    # calibrate_noise_floor()
+
+    print(f'We have logged in as {client.user}')
+    print("Bot is now active on the following servers:")
+
+    for guild in client.guilds:
+        # Print the server name to the console
+        print(f"- {guild.name} (ID: {guild.id})")
+
+        try:
+            # Look specifically for a "general" channel
+            general_channel = discord.utils.get(guild.text_channels, name="general")
+
+            # If "general" doesn't exist or lacks permissions, find the first channel where the bot can send messages
+            if not general_channel or not general_channel.permissions_for(guild.me).send_messages:
+                general_channel = next(
+                    (channel for channel in guild.text_channels if channel.permissions_for(guild.me).send_messages),
+                    None
+                )
+
+            # Send a message if a valid channel is found
+            if general_channel:
+                await general_channel.send(f"Hello {guild.name}! I AM GAY")
+            else:
+                print(f"Could not find a suitable channel to send a message in {guild.name}")
+
+        except Exception as e:
+            print(f"Error sending message in guild {guild.name}: {e}")
+
+
+class SpeakingSink(voice_recv.AudioSink):
+    def __init__(self, vc, process_audio_callback, event_loop: AbstractEventLoop, chunk_size=48000):
+        super().__init__()
+        self.vc = vc
+        self.process_audio_callback = process_audio_callback
+        self.event_loop = event_loop  # Store the event loop explicitly
+        self.chunk_size = chunk_size  # Buffer size for PCM audio
+        self.audio_buffers = {}  # Store PCM data for each user
+
+    def wants_opus(self) -> bool:
+        return False  # Request PCM data for Whisper transcription
+
+    def cleanup(self):
+        print("Sink cleanup called.")
+
+    def write(self, user, data):
+        # Accumulate PCM audio data for the user
+        if user not in self.audio_buffers:
+            self.audio_buffers[user] = []
+        self.audio_buffers[user].append(data.pcm)
+
+        # Check if the buffer size has reached the chunk size
+        if len(self.audio_buffers[user]) >= self.chunk_size:
+            # Combine buffer into a single PCM chunk
+            pcm_data = b"".join(self.audio_buffers[user])
+            self.audio_buffers[user] = []  # Clear the buffer
+
+            # Schedule the process_audio_callback in the event loop
+            self.event_loop.create_task(self.process_audio_callback(user, pcm_data, self.vc))
+
+    @voice_recv.AudioSink.listener()
+    def on_voice_member_speaking_start(self, member):
+        print(f"{member.display_name} started speaking.")
+        if member not in self.audio_buffers:
+            self.audio_buffers[member] = []  # Initialize buffer for the user
+
+    @voice_recv.AudioSink.listener()
+    def on_voice_member_speaking_stop(self, member):
+        print(f"{member.display_name} stopped speaking.")
+        if member in self.audio_buffers and self.audio_buffers[member]:
+            # Combine remaining PCM data into a single chunk
+            pcm_data = b"".join(self.audio_buffers[member])
+            self.audio_buffers[member] = []  # Clear the buffer
+
+            # Schedule the process_audio_callback in the event loop
+            self.event_loop.create_task(self.process_audio_callback(member, pcm_data, self.vc))
+
+
+
+# Join command to connect the bot to a voice channel
 @client.event
 async def on_message(message):
-    if message.content.startswith('!join') and message.author.voice:
-        channel = message.author.voice.channel
-        await channel.connect()
-        await message.channel.send("I've joined the voice channel!")
+    if message.content.startswith("!join") and message.author.voice:
+        try:
+            # Connect to the user's voice channel
+            channel = message.author.voice.channel
+            vc = await channel.connect(cls=voice_recv.VoiceRecvClient)
 
-    elif message.content.startswith('!leave'):
+            # Pass the current asyncio event loop to SpeakingSink
+            vc.listen(SpeakingSink(vc, process_audio, asyncio.get_running_loop(), chunk_size=48000))
+            await message.channel.send("Listening for speech!")
+        except Exception as e:
+            print(f"Error joining voice channel: {e}")
+            await message.channel.send("Failed to join the voice channel.")
+
+
+
+    elif message.content.startswith("!leave"):
         if message.guild.voice_client:
             await message.guild.voice_client.disconnect()
-            await message.channel.send("I've left the voice channel!")
+            await message.channel.send("I've left the voice channel.")
+        else:
+            await message.channel.send("I'm not currently in a voice channel.")
 
-# Handling voice data
-@client.event
-async def on_voice_state_update(member, before, after):
-    if after.channel and member == client.user:  # Bot joins a channel
-        voice_client = discord.utils.get(client.voice_clients, guild=member.guild)
-        voice_client.listen(discord.AudioSource())  # Start listening (this part needs proper setup to handle audio)
+    elif message.content.startswith("!chat"):
+        prompt = message.content[len("!chat"):].strip()
+        if prompt:
+            response = await generate_chat_response(prompt)
+            await message.channel.send(response)
+        else:
+            await message.channel.send("You need to say something after '!chat'!")
 
-# Function to transcribe speech using Whisper
-async def transcribe_speech(audio_source):
-    audio_data = BytesIO()
-    # Convert PCM data to WAV (this part requires proper audio handling)
-    audio_data.write(audio_source.read())
-    audio_data.seek(0)
-    result = model.transcribe(audio_data)
-    return result['text']
+    elif message.content.startswith("!image"):
+        prompt = message.content[len("!image"):].strip()
+        if prompt:
+            image_url = await generate_image(prompt)
+            await message.channel.send(image_url)
+        else:
+            await message.channel.send("You need to describe the image!")
 
-# Function to synthesize speech using ElevenLabs
-def synthesize_speech(text):
-    response = requests.post(
-        "https://api.elevenlabs.io/synthesis",
-        json={"text": text},
-        headers={"Authorization": f"Bearer {elevenlabs_api_key}"}
-    )
-    audio_url = response.json()['url']
-    return audio_url
 
-# Play synthesized speech in voice channel
-async def play_speech(vc, url):
-    vc.play(discord.FFmpegPCMAudio(url))
-# collect server data
-async def get_server_info(guild):
-    members_info = []
-    for member in guild.members:
-        members_info.append({
-            'name': member.name,
-            'display_name': member.display_name,
-            'id': member.id,
-            'bot': member.bot,
-            'roles': [role.name for role in member.roles],
-            'joined_at': member.joined_at,
-            'top_role': member.top_role.name,
-            'status': str(member.status)
-        })
+def validate_wav(file_path):
+    """Validate WAV file properties."""
+    import wave
+    try:
+        with wave.open(file_path, 'rb') as wf:
+            print(f"Sample Rate: {wf.getframerate()}")  # Should be 48000
+            print(f"Channels: {wf.getnchannels()}")    # Should be 1 (mono)
+            print(f"Sample Width: {wf.getsampwidth()}") # Should be 2 bytes (16-bit)
+            print(f"Frame Count: {wf.getnframes()}")
+    except Exception as e:
+        print(f"Error validating WAV file: {e}")
 
-    server_info = {
-        'server_name': guild.name,
-        'server_id': guild.id,
-        'member_count': guild.member_count,
-        'members': members_info
-    }
 
-    return server_info
+def pcm_to_wav(pcm_data, sample_rate=48000, channels=1, target_rate=16000):
+    """Convert raw PCM data to a valid WAV file."""
+    try:
+        if not isinstance(pcm_data, (bytes, bytearray)):
+            raise ValueError("PCM data must be bytes or bytearray")
 
-async def generate_response(prompt, server_info="", user_messages=""):
+        # Convert PCM bytes to numpy array
+        audio_array = np.frombuffer(pcm_data, dtype=np.int16)
+
+        # Normalize audio
+        audio_array = audio_array / np.max(np.abs(audio_array))
+
+        # Resample to target rate
+        audio = AudioSegment(
+            audio_array.tobytes(),
+            frame_rate=sample_rate,
+            sample_width=2,
+            channels=channels
+        ).set_frame_rate(target_rate).set_channels(1)
+
+        # Write to BytesIO as WAV
+        wav_io = BytesIO()
+        audio.export(wav_io, format="wav")
+        wav_io.seek(0)
+        return wav_io
+    except Exception as e:
+        print(f"Error in pcm_to_wav: {e}")
+        return None
+
+
+
+
+def transcribe_audio_locally(file_path):
+    """Transcribe audio using the Whisper Python library locally."""
+    try:
+        result = whisper_model.transcribe(file_path)
+        return result["text"]  # Return the transcribed text
+    except Exception as e:
+        print(f"Error transcribing audio locally: {e}")
+        return None
+
+
+async def process_audio(user, pcm_data, vc):
+    """Process PCM audio for transcription and playback."""
+    if not pcm_data:
+        print(f"No PCM data for {user.display_name}. Skipping transcription.")
+        return
+
+    try:
+        # Convert PCM data to WAV
+        wav_audio = pcm_to_wav(pcm_data)
+        if wav_audio is None:
+            raise ValueError("Failed to convert PCM to WAV")
+
+        # Save WAV to temporary file for Whisper
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_audio_file:
+            temp_audio_file.write(wav_audio.getvalue())
+            temp_audio_file.flush()
+            temp_audio_path = temp_audio_file.name
+
+        print(f"Saved WAV file for {user.display_name}: {temp_audio_path}")
+
+        # Transcribe audio
+        transcription = transcribe_audio_locally(temp_audio_path)
+
+        # Clean up temporary file
+        os.remove(temp_audio_path)
+
+        if transcription:
+            print(f"{user.display_name} said: {transcription}")
+
+            # Generate response
+            response = await generate_chat_response(transcription)
+            print(f"Bot response: {response}")
+
+            # Play response audio
+            if vc and not vc.is_playing():
+                await play_audio(vc, response)
+        else:
+            print(f"Failed to transcribe audio for {user.display_name}.")
+    except Exception as e:
+        print(f"Error processing audio for {user.display_name}: {e}")
+
+# Generate ChatGPT Response
+async def generate_chat_response(prompt, server_info="", user_messages=""):
     full_prompt = f"{bot_personality}\n\nServer Info: {server_info}\n\nUser Messages: {user_messages}\n\nUser: {prompt}\nAI:"
 
     response = openai_client.chat.completions.create(
@@ -137,100 +349,48 @@ async def generate_response(prompt, server_info="", user_messages=""):
 
     return response.choices[0].message.content
 
-# new-new-new-new-new-general
-
+# Generate DALL-E Image
 async def generate_image(prompt):
-    response = openai_client.images.generate(
-        model="dall-e-3",
-        prompt=prompt,
-        n=1,
-        size="1024x1024"
-    )
+    """Generate an image using OpenAI's DALL-E."""
+    try:
+        response = openai_client.images.generate(
+            model="dall-e-3",
+            prompt=prompt,
+            n=1,
+            size="512x512"
+        )
+        return response.data[0].url
+    except Exception as e:
+        print(f"Error generating image: {e}")
+        return "Couldn't create the image. Try again!"
 
-    image_url = response.data[0].url
-    return image_url
+async def play_audio(vc, text):
+    """Generate TTS audio and play it in the voice channel."""
+    try:
+        # Generate TTS audio asynchronously
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: openai_client.audio.speech.create(
+                model="tts-1",
+                voice="alloy",
+                input=text
+            )
+        )
 
-# async def cache_messages_from_channel(channel, user_id):
-#     messages = []
-#     async for message in channel.history(limit=None):
-#         if message.author.id == user_id:
-#             messages.append(message.content)
-#     return messages
+        # Convert audio content to BytesIO
+        audio_data = BytesIO(response.content)
+        audio_data.seek(0)
 
-# async def get_user_messages(channel, user_id):
-#     # Cache messages if not already cached
-#     if channel.id not in message_cache:
-#         message_cache[channel.id] = {}
-#     if user_id not in message_cache[channel.id]:
-#         message_cache[channel.id][user_id] = await cache_messages_from_channel(channel, user_id)
-#     return message_cache[channel.id][user_id]
+        # Use FFmpeg to play the audio
+        vc.play(discord.FFmpegPCMAudio(audio_data, pipe=True), after=lambda e: print(f"Finished playing: {e}"))
 
-@client.event
-async def on_ready():
-    print(f'We have logged in as {client.user}')
-    for guild in client.guilds:
-        server_data[guild.id] = await get_server_info(guild)
-        # Find the first text channel where the bot has permissions to send messages
-        general_channel = discord.utils.get(guild.text_channels, name='general')
-        if general_channel and general_channel.permissions_for(guild.me).send_messages:
-            await general_channel.send(f'Hello {guild.name}!')
-            break  # Stop after sending the message to one channel in the guild
+        # Allow playback to finish
+        while vc.is_playing():
+            await asyncio.sleep(0.1)
+    except Exception as e:
+        print(f"Error playing audio: {e}")
 
-@client.event
-async def on_message(message):
-    # Ignore messages from the bot itself
-    if message.author == client.user:
-        return
-    
-    # !chat hello
 
-    # Generate a response not from the bot
-    if message.content.startswith('!chat'):
-        prompt = message.content[len('!chat'):].strip()
-        user_id = message.author.id
-        guild_data = server_data.get(message.guild.id, {})
-        # Extracting the user info from the server data
-        user_info = next((member for member in guild_data['members'] if member['id'] == user_id), None)
-        #
-        # user_messages = await get_user_messages(message.channel, user_id)
-        #
-        if user_info:
-            prompt = f"User {message.author.display_name} ({message.author.name}): {prompt}\nUser Info: {user_info}"
-
-        response = await generate_response(prompt, server_data, user_messages="")
-        await message.channel.send(response)
-
-    if message.content.startswith('!image'):
-        prompt = message.content[len('!image'):].strip()
-        image_url = await generate_image(prompt)
-        await message.channel.send(image_url)
-
-@client.event
-async def on_member_update(before, after):
-    # Update status in the server data
-    guild_id = after.guild.id
-    for member in server_data[guild_id]['members']:
-        if member['id'] == after.id:
-            member['status'] = str(after.status)
-            break
-
-async def audio_processor(audio_source):
-    # Convert raw audio to a suitable format
-    sound = AudioSegment.from_raw(audio_source, sample_width=2, frame_rate=48000, channels=1)
-    buffer = BytesIO()
-    sound.export(buffer, format="wav")
-    buffer.seek(0)
-    return buffer
-
-async def play_speech(vc, url):
-    process = (
-        ffmpeg
-        .input(url)
-        .output('pipe:', format='s16le', acodec='pcm_s16le', ac=2, ar='48k')
-        .run_async(pipe_stdout=True, pipe_stderr=True)
-    )
-    audio_source = discord.PCMAudio(process.stdout)
-    vc.play(audio_source)
-
-# Run the bot with your Discord bot token
-client.run(discord_token)
+# Run Bot
+client.run(DISCORD_TOKEN)
