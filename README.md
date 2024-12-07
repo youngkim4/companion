@@ -1,6 +1,6 @@
-Companion AI Discord Bot
+## Companion AI Discord Bot
 
-This project is a Discord bot that functions as an AI-powered voice assistant. It can transcribe speech from users in a voice channel, respond using GPT-based text-to-speech (TTS), and interact with users through text commands.
+## This project is a Discord bot that functions as an AI-powered voice assistant. It can transcribe speech from users in a voice channel, respond using GPT-based text-to-speech (TTS), and interact with users through text commands.
 
 ## Features
 1. **Voice Transcription**: 
